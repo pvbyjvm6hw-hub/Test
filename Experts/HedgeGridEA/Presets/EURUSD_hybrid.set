@@ -1,0 +1,30 @@
+; HedgeGridEA preset: EURUSD (HYBRID)
+; Load this via: Strategy Tester -> Load / In-chart EA -> Load
+InpStrategy=4
+InpSymbolPreset=1
+InpMagicNumber=990011
+InpOrderComment=HedgeGridEA
+InpVerboseLogging=true
+InpStartingLot=0.01
+InpLotMultiplier=1.3
+InpMaxLotCap=1.0
+InpBasketTPPercent=0.5
+InpBasketSLPercent=5.0
+InpMaxOpenPositions=10
+InpMaxGridLevels=5
+InpCloseAllOnFriday=true
+InpFridayCloseHour=21
+InpGridSpacingATRMult=1.0
+InpATRPeriod=14
+InpATRTimeframe=16385
+InpHedgeTriggerATRMult=2.0
+InpHedgeLotMultiplier=1.5
+InpUseSpreadFilter=true
+InpMaxSpreadPips=2.0
+InpUseSessionFilter=true
+InpSessionStartHour=7
+InpSessionEndHour=20
+InpUseTrendFilter=true
+InpTrendEMAFast=50
+InpTrendEMASlow=200
+InpTrendTimeframe=16388
