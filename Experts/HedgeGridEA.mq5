@@ -299,13 +299,18 @@ string StrategyToString(const ENUM_STRATEGY_PROFILE s)
 
 bool ApplyPreset(const ENUM_SYMBOL_PRESET preset)
   {
+   // User's explicit strategy choice always wins: if InpStrategy is
+   // anything other than the default (STRATEGY_HYBRID), we keep it.
+   // Otherwise the preset's recommended strategy takes effect.
+   const bool respectUserStrategy = (InpStrategy != STRATEGY_HYBRID);
+
    switch(preset)
      {
       case PRESET_CUSTOM:
          return(false);
 
       case PRESET_EURUSD:
-         g_Strategy            = STRATEGY_HYBRID;
+         if(!respectUserStrategy) g_Strategy = STRATEGY_HYBRID;
          g_StartingLot         = 0.01;
          g_LotMultiplier       = 1.30;
          g_MaxLotCap           = 1.00;
@@ -313,35 +318,60 @@ bool ApplyPreset(const ENUM_SYMBOL_PRESET preset)
          g_BasketSLPercent     = 5.00;
          g_MaxGridLevels       = 5;
          g_GridSpacingATRMult  = 1.00;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_H1;
          g_HedgeTriggerATRMult = 2.00;
          g_HedgeLotMultiplier  = 1.50;
          g_MaxSpreadPips       = 2.0;
          g_UseTrendFilter      = true;
-         g_UseSessionFilter    = true;
-         g_ATRTimeframe        = PERIOD_H1;
+         g_TrendEMAFast        = 50;
+         g_TrendEMASlow        = 200;
          g_TrendTimeframe      = PERIOD_H4;
+         g_UseSessionFilter    = true;
+         g_SessionStartHour    = 7;
+         g_SessionEndHour      = 20;
+         g_RSIPeriod           = 14;
+         g_RSIOversold         = 30.0;
+         g_RSIOverbought       = 70.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 2.0;
+         g_BreakoutLookbackDays= 1;
          return(true);
 
       case PRESET_GBPUSD:
-         g_Strategy            = STRATEGY_HYBRID;
+         // GBPUSD: trendier than EURUSD -> default TREND_GRID
+         if(!respectUserStrategy) g_Strategy = STRATEGY_TREND_GRID;
          g_StartingLot         = 0.01;
          g_LotMultiplier       = 1.30;
          g_MaxLotCap           = 1.00;
-         g_BasketTPPercent     = 0.50;
+         g_BasketTPPercent     = 0.55;
          g_BasketSLPercent     = 5.00;
          g_MaxGridLevels       = 5;
-         g_GridSpacingATRMult  = 1.00;
+         g_GridSpacingATRMult  = 1.10;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_H1;
          g_HedgeTriggerATRMult = 2.00;
          g_HedgeLotMultiplier  = 1.50;
          g_MaxSpreadPips       = 2.5;
          g_UseTrendFilter      = true;
-         g_UseSessionFilter    = true;
-         g_ATRTimeframe        = PERIOD_H1;
+         g_TrendEMAFast        = 34;
+         g_TrendEMASlow        = 144;
          g_TrendTimeframe      = PERIOD_H4;
+         g_UseSessionFilter    = true;
+         g_SessionStartHour    = 7;
+         g_SessionEndHour      = 20;
+         g_RSIPeriod           = 14;
+         g_RSIOversold         = 30.0;
+         g_RSIOverbought       = 70.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 2.0;
+         g_BreakoutLookbackDays= 1;
          return(true);
 
       case PRESET_USDJPY:
-         g_Strategy            = STRATEGY_HYBRID;
+         // USDJPY: steady, session-sensitive; default HYBRID but
+         // with tight Tokyo/London overlap
+         if(!respectUserStrategy) g_Strategy = STRATEGY_HYBRID;
          g_StartingLot         = 0.01;
          g_LotMultiplier       = 1.30;
          g_MaxLotCap           = 1.00;
@@ -349,35 +379,59 @@ bool ApplyPreset(const ENUM_SYMBOL_PRESET preset)
          g_BasketSLPercent     = 5.00;
          g_MaxGridLevels       = 5;
          g_GridSpacingATRMult  = 1.00;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_H1;
          g_HedgeTriggerATRMult = 2.00;
          g_HedgeLotMultiplier  = 1.50;
          g_MaxSpreadPips       = 2.0;
          g_UseTrendFilter      = true;
-         g_UseSessionFilter    = true;
-         g_ATRTimeframe        = PERIOD_H1;
+         g_TrendEMAFast        = 50;
+         g_TrendEMASlow        = 200;
          g_TrendTimeframe      = PERIOD_H4;
+         g_UseSessionFilter    = true;
+         g_SessionStartHour    = 2;    // catch Tokyo
+         g_SessionEndHour      = 17;
+         g_RSIPeriod           = 14;
+         g_RSIOversold         = 30.0;
+         g_RSIOverbought       = 70.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 2.0;
+         g_BreakoutLookbackDays= 1;
          return(true);
 
       case PRESET_GBPJPY:
-         g_Strategy            = STRATEGY_TREND_GRID;
+         // Volatile cross -> TREND_GRID, wider spacing, tighter risk
+         if(!respectUserStrategy) g_Strategy = STRATEGY_TREND_GRID;
          g_StartingLot         = 0.01;
          g_LotMultiplier       = 1.25;
          g_MaxLotCap           = 0.80;
          g_BasketTPPercent     = 0.60;
          g_BasketSLPercent     = 5.00;
          g_MaxGridLevels       = 4;
-         g_GridSpacingATRMult  = 1.20;
+         g_GridSpacingATRMult  = 1.30;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_H1;
          g_HedgeTriggerATRMult = 2.20;
          g_HedgeLotMultiplier  = 1.50;
          g_MaxSpreadPips       = 4.0;
          g_UseTrendFilter      = true;
-         g_UseSessionFilter    = true;
-         g_ATRTimeframe        = PERIOD_H1;
+         g_TrendEMAFast        = 34;
+         g_TrendEMASlow        = 144;
          g_TrendTimeframe      = PERIOD_H4;
+         g_UseSessionFilter    = true;
+         g_SessionStartHour    = 7;
+         g_SessionEndHour      = 20;
+         g_RSIPeriod           = 14;
+         g_RSIOversold         = 25.0;  // wider swings
+         g_RSIOverbought       = 75.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 2.2;
+         g_BreakoutLookbackDays= 1;
          return(true);
 
       case PRESET_EURCHF:
-         g_Strategy            = STRATEGY_DUAL_HEDGE;
+         // Classic range pair -> DUAL_HEDGE + mean reversion tuned
+         if(!respectUserStrategy) g_Strategy = STRATEGY_DUAL_HEDGE;
          g_StartingLot         = 0.01;
          g_LotMultiplier       = 1.20;
          g_MaxLotCap           = 1.00;
@@ -385,35 +439,59 @@ bool ApplyPreset(const ENUM_SYMBOL_PRESET preset)
          g_BasketSLPercent     = 5.00;
          g_MaxGridLevels       = 8;
          g_GridSpacingATRMult  = 0.70;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_H1;
          g_HedgeTriggerATRMult = 1.80;
          g_HedgeLotMultiplier  = 1.40;
          g_MaxSpreadPips       = 3.0;
          g_UseTrendFilter      = false;
-         g_UseSessionFilter    = false;
-         g_ATRTimeframe        = PERIOD_H1;
+         g_TrendEMAFast        = 50;
+         g_TrendEMASlow        = 200;
          g_TrendTimeframe      = PERIOD_H4;
+         g_UseSessionFilter    = false;
+         g_SessionStartHour    = 0;
+         g_SessionEndHour      = 23;
+         g_RSIPeriod           = 9;    // snappier for ranging
+         g_RSIOversold         = 25.0;
+         g_RSIOverbought       = 75.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 1.8;
+         g_BreakoutLookbackDays= 1;
          return(true);
 
       case PRESET_XAUUSD:
-         g_Strategy            = STRATEGY_TREND_GRID;
+         // Gold trends strongly -> TREND_GRID, wide ATR spacing
+         if(!respectUserStrategy) g_Strategy = STRATEGY_TREND_GRID;
          g_StartingLot         = 0.01;
          g_LotMultiplier       = 1.40;
          g_MaxLotCap           = 0.50;
          g_BasketTPPercent     = 0.70;
          g_BasketSLPercent     = 6.00;
          g_MaxGridLevels       = 4;
-         g_GridSpacingATRMult  = 1.50;
+         g_GridSpacingATRMult  = 1.60;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_H1;
          g_HedgeTriggerATRMult = 2.50;
          g_HedgeLotMultiplier  = 1.60;
          g_MaxSpreadPips       = 30.0;
          g_UseTrendFilter      = true;
-         g_UseSessionFilter    = true;
-         g_ATRTimeframe        = PERIOD_H1;
+         g_TrendEMAFast        = 20;    // faster reacting EMA on gold
+         g_TrendEMASlow        = 100;
          g_TrendTimeframe      = PERIOD_H4;
+         g_UseSessionFilter    = true;
+         g_SessionStartHour    = 8;    // London open onwards
+         g_SessionEndHour      = 21;
+         g_RSIPeriod           = 14;
+         g_RSIOversold         = 30.0;
+         g_RSIOverbought       = 70.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 2.2;
+         g_BreakoutLookbackDays= 1;
          return(true);
 
       case PRESET_US30:
-         g_Strategy            = STRATEGY_HYBRID;
+         // US index: NY-session trend + breakout character
+         if(!respectUserStrategy) g_Strategy = STRATEGY_HYBRID;
          g_StartingLot         = 0.10;
          g_LotMultiplier       = 1.30;
          g_MaxLotCap           = 2.00;
@@ -421,17 +499,29 @@ bool ApplyPreset(const ENUM_SYMBOL_PRESET preset)
          g_BasketSLPercent     = 5.00;
          g_MaxGridLevels       = 5;
          g_GridSpacingATRMult  = 1.00;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_M30;
          g_HedgeTriggerATRMult = 2.00;
          g_HedgeLotMultiplier  = 1.50;
          g_MaxSpreadPips       = 50.0;
          g_UseTrendFilter      = true;
+         g_TrendEMAFast        = 21;
+         g_TrendEMASlow        = 55;
+         g_TrendTimeframe      = PERIOD_H1;
          g_UseSessionFilter    = true;
-         g_ATRTimeframe        = PERIOD_M30;
-         g_TrendTimeframe      = PERIOD_H4;
+         g_SessionStartHour    = 14;   // NY open (server dependent)
+         g_SessionEndHour      = 21;
+         g_RSIPeriod           = 9;
+         g_RSIOversold         = 30.0;
+         g_RSIOverbought       = 70.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 2.0;
+         g_BreakoutLookbackDays= 1;
          return(true);
 
       case PRESET_BTCUSD:
-         g_Strategy            = STRATEGY_BREAKOUT;
+         // Crypto: 24/7 breakout market, no session gating
+         if(!respectUserStrategy) g_Strategy = STRATEGY_BREAKOUT;
          g_StartingLot         = 0.01;
          g_LotMultiplier       = 1.25;
          g_MaxLotCap           = 0.50;
@@ -439,13 +529,24 @@ bool ApplyPreset(const ENUM_SYMBOL_PRESET preset)
          g_BasketSLPercent     = 8.00;
          g_MaxGridLevels       = 3;
          g_GridSpacingATRMult  = 1.50;
+         g_ATRPeriod           = 14;
+         g_ATRTimeframe        = PERIOD_H1;
          g_HedgeTriggerATRMult = 3.00;
          g_HedgeLotMultiplier  = 1.50;
          g_MaxSpreadPips       = 500.0;
          g_UseTrendFilter      = false;
-         g_UseSessionFilter    = false;
-         g_ATRTimeframe        = PERIOD_H1;
+         g_TrendEMAFast        = 50;
+         g_TrendEMASlow        = 200;
          g_TrendTimeframe      = PERIOD_H4;
+         g_UseSessionFilter    = false;
+         g_SessionStartHour    = 0;
+         g_SessionEndHour      = 23;
+         g_RSIPeriod           = 14;
+         g_RSIOversold         = 30.0;
+         g_RSIOverbought       = 70.0;
+         g_BBPeriod            = 20;
+         g_BBDeviation         = 2.0;
+         g_BreakoutLookbackDays= 3;     // wider breakout window for crypto
          return(true);
      }
    return(false);
@@ -1039,20 +1140,58 @@ bool TryOpenHedge(const int loserSide)
 
 //==================================================================//
 // STRATEGY ENGINES                                                   //
+//  Each strategy respects the spread + session filters so that      //
+//  all five profiles behave distinctly, even under the same preset. //
 //==================================================================//
-int Strategy_DualHedge() { return(ENTRY_BOTH); }
 
+//+------------------------------------------------------------------+
+//| Raw EMA-cross direction. Does NOT require InpUseTrendFilter=true |
+//| (that toggle only affects TrendDirection() used by filters).     |
+//|   1  = up, -1 = down, 0 = flat / indicator not ready             |
+//+------------------------------------------------------------------+
+int EmaCrossDirection()
+  {
+   double fast = 0.0, slow = 0.0;
+   if(!GetEMAValues(fast, slow)) return(0);
+   if(fast > slow) return(1);
+   if(fast < slow) return(-1);
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
+//| STRATEGY_DUAL_HEDGE: open BOTH sides, no direction signal.       |
+//| Respects session + spread so it doesn't fire against bad fills.  |
+//+------------------------------------------------------------------+
+int Strategy_DualHedge()
+  {
+   if(!SessionOK())       return(ENTRY_NONE);
+   if(!SpreadOK(_Symbol)) return(ENTRY_NONE);
+   return(ENTRY_BOTH);
+  }
+
+//+------------------------------------------------------------------+
+//| STRATEGY_TREND_GRID: EMA-cross direction only.                   |
+//| Uses EmaCrossDirection directly so turning off the GLOBAL trend  |
+//| filter (used by HYBRID/grid) doesn't disable this strategy.      |
+//+------------------------------------------------------------------+
 int Strategy_TrendGrid()
   {
-   if(!g_UseTrendFilter) return(ENTRY_NONE);
-   const int dir = TrendDirection();
+   if(!SessionOK())       return(ENTRY_NONE);
+   if(!SpreadOK(_Symbol)) return(ENTRY_NONE);
+   const int dir = EmaCrossDirection();
    if(dir > 0) return(ENTRY_BUY);
    if(dir < 0) return(ENTRY_SELL);
    return(ENTRY_NONE);
   }
 
+//+------------------------------------------------------------------+
+//| STRATEGY_MEAN_REVERSION: RSI extremes + Bollinger touch.         |
+//+------------------------------------------------------------------+
 int Strategy_MeanReversion()
   {
+   if(!SessionOK())       return(ENTRY_NONE);
+   if(!SpreadOK(_Symbol)) return(ENTRY_NONE);
+
    const double rsi = GetRSI();
    if(rsi < 0.0) return(ENTRY_NONE);
    double up = 0.0, lo = 0.0, mid = 0.0;
@@ -1065,8 +1204,14 @@ int Strategy_MeanReversion()
    return(ENTRY_NONE);
   }
 
+//+------------------------------------------------------------------+
+//| STRATEGY_BREAKOUT: break of previous N-day high/low.             |
+//+------------------------------------------------------------------+
 int Strategy_Breakout()
   {
+   if(!SessionOK())       return(ENTRY_NONE);
+   if(!SpreadOK(_Symbol)) return(ENTRY_NONE);
+
    const int lookback = MathMax(1, g_BreakoutLookbackDays);
    double highs[], lows[];
    if(CopyHigh(_Symbol, PERIOD_D1, 1, lookback, highs) < lookback) return(ENTRY_NONE);
@@ -1086,12 +1231,16 @@ int Strategy_Breakout()
    return(ENTRY_NONE);
   }
 
+//+------------------------------------------------------------------+
+//| STRATEGY_HYBRID: session + spread + trend direction all agree.   |
+//| Gracefully degrades to DUAL_HEDGE if the trend filter is off.    |
+//+------------------------------------------------------------------+
 int Strategy_Hybrid()
   {
-   if(!SessionOK()) return(ENTRY_NONE);
+   if(!SessionOK())       return(ENTRY_NONE);
    if(!SpreadOK(_Symbol)) return(ENTRY_NONE);
-   if(!g_UseTrendFilter) return(ENTRY_BOTH); // graceful fallback
-   const int dir = TrendDirection();
+   if(!g_UseTrendFilter)  return(ENTRY_BOTH);
+   const int dir = EmaCrossDirection();
    if(dir > 0) return(ENTRY_BUY);
    if(dir < 0) return(ENTRY_SELL);
    return(ENTRY_NONE);
@@ -1145,8 +1294,12 @@ int OnInit()
    LoadInputsIntoWorking();
    const bool applied = ApplyPreset(InpSymbolPreset);
    if(applied)
+     {
+      const bool userPickedStrategy = (InpStrategy != STRATEGY_HYBRID);
       Print("[HGEA] Preset applied: ", PresetToString(InpSymbolPreset),
-            " -> strategy=", StrategyToString(g_Strategy));
+            " -> strategy=", StrategyToString(g_Strategy),
+            userPickedStrategy ? " (kept user InpStrategy)" : " (from preset default)");
+     }
    else
       Print("[HGEA] Using manual inputs. strategy=", StrategyToString(g_Strategy));
 
@@ -1178,6 +1331,26 @@ int OnInit()
          " digits=", (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS),
          " point=",  DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_POINT), 8),
          " pip=",    DoubleToString(PipSize(_Symbol), 8));
+
+   // 7. Active configuration dump -- so you can confirm at a glance
+   //    that presets + InpStrategy produced distinct behaviour.
+   Print("[HGEA] ACTIVE STRATEGY: ", StrategyToString(g_Strategy));
+   Print("[HGEA] Lot: start=", DoubleToString(g_StartingLot, 2),
+         " mult=",  DoubleToString(g_LotMultiplier, 2),
+         " cap=",   DoubleToString(g_MaxLotCap, 2));
+   Print("[HGEA] Grid: ATRx", DoubleToString(g_GridSpacingATRMult, 2),
+         " tf=",    EnumToString(g_ATRTimeframe),
+         " levels=", g_MaxGridLevels);
+   Print("[HGEA] Hedge: trigATRx", DoubleToString(g_HedgeTriggerATRMult, 2),
+         " lotMult=", DoubleToString(g_HedgeLotMultiplier, 2));
+   Print("[HGEA] Basket: TP=", DoubleToString(g_BasketTPPercent, 2), "%",
+         " SL=", DoubleToString(g_BasketSLPercent, 2), "%");
+   Print("[HGEA] Filters: spread<=", DoubleToString(g_MaxSpreadPips, 1), "p",
+         " session=[", g_SessionStartHour, "..", g_SessionEndHour, "] use=", g_UseSessionFilter,
+         " trend(EMA ", g_TrendEMAFast, "/", g_TrendEMASlow, " on ", EnumToString(g_TrendTimeframe), ") use=", g_UseTrendFilter);
+   Print("[HGEA] Extras: RSI(", g_RSIPeriod, ") ", DoubleToString(g_RSIOversold,0), "/", DoubleToString(g_RSIOverbought,0),
+         " BB(", g_BBPeriod, ",", DoubleToString(g_BBDeviation, 2), ")",
+         " breakoutDays=", g_BreakoutLookbackDays);
    return(INIT_SUCCEEDED);
   }
 
