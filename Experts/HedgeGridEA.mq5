@@ -109,6 +109,30 @@ input int    InpBBPeriod             = 20;    // Bollinger period
 input double InpBBDeviation          = 2.0;   // Bollinger deviation
 input int    InpBreakoutLookbackDays = 1;     // Lookback days for breakout range
 
+input group "=== GRID SL PROTECTION (NEW) ==="
+input bool   InpUseADXFilter         = true;   // Skip adding grid when ADX shows strong adverse trend
+input int    InpADXPeriod            = 14;     // ADX period
+input ENUM_TIMEFRAMES InpADXTimeframe= PERIOD_H1; // ADX timeframe
+input double InpADXStrongTrend       = 25.0;   // ADX threshold that counts as "strong trend"
+
+input bool   InpUseVolSpikeGuard     = true;   // Pause new grid adds on ATR spike
+input double InpVolSpikeMult         = 2.0;    // Current ATR / average ATR > this -> pause
+input int    InpVolAvgBars           = 50;     // Bars to average ATR over
+
+input bool   InpUseMaxLotExposure    = true;   // Hard cap on total open volume (both sides)
+input double InpMaxTotalLots         = 2.0;    // Max combined lots across all EA positions
+
+input bool   InpUseBasketTrailing    = true;   // Trail basket profit to lock gains
+input double InpTrailActivatePercent = 0.30;   // Trail activates once basket P&L >= this % of equity
+input double InpTrailGiveBackPercent = 0.50;   // Close basket if we give back this fraction of peak
+
+input bool   InpUseDynamicTP         = true;   // Lower basket TP target as grid grows
+input double InpDynamicTPMinPercent  = 0.10;   // Don't go below this floor % of equity
+
+input bool   InpUseRecoveryMode      = true;   // After SL hit, shrink next basket's starting lot
+input int    InpRecoveryCycles       = 3;      // How many cycles to stay in recovery
+input double InpRecoveryLotFactor    = 0.50;   // Multiplier applied to InpStartingLot during recovery
+
 //==================================================================//
 // WORKING (MUTABLE) VARIABLES                                        //
 //   Presets modify these at OnInit(), not the user inputs.           //
@@ -151,11 +175,17 @@ int g_hEmaFast   = INVALID_HANDLE;
 int g_hEmaSlow   = INVALID_HANDLE;
 int g_hRSI       = INVALID_HANDLE;
 int g_hBB        = INVALID_HANDLE;
+int g_hADX       = INVALID_HANDLE;
 
 //--- Trade wrappers & state ---------------------------------------
 CTrade         g_Trade;
 CPositionInfo  g_Pos;
 datetime       g_LastBarTime = 0;
+
+//--- Basket-state tracking (reset when flat) ----------------------
+double g_BasketPeakProfit = 0.0;   // highest floating P&L seen while basket is open
+int    g_BasketOpenCount  = 0;     // last tick's open count, to detect transitions
+int    g_RecoveryLeft     = 0;     // cycles remaining in recovery mode
 
 //==================================================================//
 // UTILITIES                                                          //
@@ -446,6 +476,10 @@ bool CreateIndicatorHandles(const string symbol)
    if(g_hBB == INVALID_HANDLE)
      { VLog("iBands failed, err=" + IntegerToString(GetLastError())); return(false); }
 
+   g_hADX = iADX(symbol, InpADXTimeframe, InpADXPeriod);
+   if(g_hADX == INVALID_HANDLE)
+     { VLog("iADX failed, err=" + IntegerToString(GetLastError())); return(false); }
+
    return(true);
   }
 
@@ -456,6 +490,7 @@ void ReleaseIndicatorHandles()
    if(g_hEmaSlow  != INVALID_HANDLE) { IndicatorRelease(g_hEmaSlow); g_hEmaSlow = INVALID_HANDLE; }
    if(g_hRSI      != INVALID_HANDLE) { IndicatorRelease(g_hRSI);     g_hRSI     = INVALID_HANDLE; }
    if(g_hBB       != INVALID_HANDLE) { IndicatorRelease(g_hBB);      g_hBB      = INVALID_HANDLE; }
+   if(g_hADX      != INVALID_HANDLE) { IndicatorRelease(g_hADX);     g_hADX     = INVALID_HANDLE; }
   }
 
 // NOTE: CopyBuffer(h,buf_index,start_pos,count,out) copies into a
@@ -495,6 +530,35 @@ bool GetBollingerBands(double &upper, double &lower, double &middle)
    upper  = bUp[0];
    lower  = bLo[0];
    return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Read ADX (main), +DI, -DI for the last closed bar.              |
+//|   iADX buffers (MT5): 0=MAIN(ADX), 1=+DI, 2=-DI                 |
+//+------------------------------------------------------------------+
+bool GetADXValues(double &adx, double &plusDI, double &minusDI)
+  {
+   double m[], p[], n[];
+   if(CopyBuffer(g_hADX, 0, 1, 1, m) < 1) return(false);
+   if(CopyBuffer(g_hADX, 1, 1, 1, p) < 1) return(false);
+   if(CopyBuffer(g_hADX, 2, 1, 1, n) < 1) return(false);
+   adx     = m[0];
+   plusDI  = p[0];
+   minusDI = n[0];
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Average ATR over the last N closed bars (for volatility-spike). |
+//+------------------------------------------------------------------+
+double GetAverageATR(const int bars)
+  {
+   if(bars < 2) return(0.0);
+   double buf[];
+   if(CopyBuffer(g_hATR, 0, 1, bars, buf) < bars) return(0.0);
+   double sum = 0.0;
+   for(int i = 0; i < bars; i++) sum += buf[i];
+   return(sum / bars);
   }
 
 //==================================================================//
@@ -611,6 +675,14 @@ double SideVolume(const int side)
    return(v);
   }
 
+//+------------------------------------------------------------------+
+//| Total open volume across BOTH sides (for the max-exposure cap). |
+//+------------------------------------------------------------------+
+double TotalEAVolume()
+  {
+   return(SideVolume(0) + SideVolume(1));
+  }
+
 double SideAvgPrice(const int side)
   {
    double sumPV = 0.0, sumV = 0.0;
@@ -706,10 +778,67 @@ bool OpenMarket(const bool isBuy, const double rawLot)
 bool CanOpenMorePositions() { return(CountEAPositions(-1) < g_MaxOpenPositions); }
 bool CanAddGridLevel(const int side) { return(CountEAPositions(side) < g_MaxGridLevels); }
 
+//+------------------------------------------------------------------+
+//| Total-volume cap (combined BUY + SELL).                          |
+//+------------------------------------------------------------------+
+bool TotalExposureOK(const double incomingLot)
+  {
+   if(!InpUseMaxLotExposure) return(true);
+   if(InpMaxTotalLots <= 0.0) return(true);
+   return(TotalEAVolume() + incomingLot <= InpMaxTotalLots + 1e-9);
+  }
+
+//+------------------------------------------------------------------+
+//| ADX adverse-trend filter. Returns true if we should BLOCK a new  |
+//| grid level because a strong trend is running AGAINST this side.  |
+//+------------------------------------------------------------------+
+bool ADXBlocksGridAdd(const int side)
+  {
+   if(!InpUseADXFilter) return(false);
+   double adx = 0.0, pDI = 0.0, nDI = 0.0;
+   if(!GetADXValues(adx, pDI, nDI)) return(false);
+   if(adx < InpADXStrongTrend) return(false); // no strong trend -> OK
+
+   // Strong trend is present. Block if DI direction is opposite to our side.
+   // BUY side (0) suffers when -DI > +DI (downtrend)
+   // SELL side (1) suffers when +DI > -DI (uptrend)
+   const bool adverse = (side == 0) ? (nDI > pDI) : (pDI > nDI);
+   if(adverse)
+     {
+      VLog(StringFormat("ADX blocks %s grid add: ADX=%.1f +DI=%.1f -DI=%.1f",
+                        side == 0 ? "BUY" : "SELL", adx, pDI, nDI));
+      return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Volatility-spike guard. Returns true if ATR is spiking vs its    |
+//| recent average and we should pause adding grid levels.           |
+//+------------------------------------------------------------------+
+bool VolatilitySpikeBlocks()
+  {
+   if(!InpUseVolSpikeGuard) return(false);
+   const double atrNow = GetATR();
+   const double atrAvg = GetAverageATR(InpVolAvgBars);
+   if(atrNow <= 0.0 || atrAvg <= 0.0) return(false);
+   if(atrNow > atrAvg * InpVolSpikeMult)
+     {
+      VLog(StringFormat("Volatility spike: ATR=%.5f > %.2fx avg %.5f -> pausing grid",
+                        atrNow, InpVolSpikeMult, atrAvg));
+      return(true);
+     }
+   return(false);
+  }
+
 double NextGridLot(const int side)
   {
    const int level = CountEAPositions(side);
-   double lot = g_StartingLot;
+   // Recovery mode: shrink the starting lot for the first position of a fresh basket
+   const double baseLot = (g_RecoveryLeft > 0 && CountEAPositions(-1) == 0)
+                           ? g_StartingLot * InpRecoveryLotFactor
+                           : g_StartingLot;
+   double lot = baseLot;
    for(int i = 0; i < level; i++)
       lot *= g_LotMultiplier;
    if(lot > g_MaxLotCap) lot = g_MaxLotCap;
@@ -717,31 +846,99 @@ double NextGridLot(const int side)
   }
 
 //+------------------------------------------------------------------+
-//| Basket TP / kill-switch / Friday-close. Returns true if closed.  |
+//| Reset basket-state counters (called when basket closes / flat).  |
+//+------------------------------------------------------------------+
+void ResetBasketState()
+  {
+   g_BasketPeakProfit = 0.0;
+  }
+
+//+------------------------------------------------------------------+
+//| Dynamic TP: as more grid levels stack, lower the TP target so    |
+//| smaller pullbacks can close the basket. Never below the floor.   |
+//+------------------------------------------------------------------+
+double EffectiveBasketTPPercent()
+  {
+   if(!InpUseDynamicTP) return(g_BasketTPPercent);
+   const int lvl = MathMax(CountEAPositions(0), CountEAPositions(1));
+   if(lvl <= 1) return(g_BasketTPPercent);
+   // Reduce by 20% per extra grid level, floored
+   double factor = 1.0 - 0.20 * (lvl - 1);
+   if(factor < 0.20) factor = 0.20;
+   double pct = g_BasketTPPercent * factor;
+   if(pct < InpDynamicTPMinPercent) pct = InpDynamicTPMinPercent;
+   return(pct);
+  }
+
+//+------------------------------------------------------------------+
+//| Basket TP / trailing lock / kill-switch / Friday-close.          |
+//| Returns true if the basket was closed on this call.              |
 //+------------------------------------------------------------------+
 bool CheckBasketExits()
   {
    const int open = CountEAPositions(-1);
-   if(open == 0) return(false);
+   if(open == 0)
+     {
+      // Detect transition from open -> flat (basket just closed)
+      if(g_BasketOpenCount > 0)
+         ResetBasketState();
+      g_BasketOpenCount = 0;
+      return(false);
+     }
+   g_BasketOpenCount = open;
 
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    if(equity <= 0.0) return(false);
 
    const double profit  = TotalEABasketProfit();
-   const double tpMoney = equity * (g_BasketTPPercent / 100.0);
+   const double tpPct   = EffectiveBasketTPPercent();
+   const double tpMoney = equity * (tpPct / 100.0);
    const double slMoney = equity * (g_BasketSLPercent / 100.0);
 
+   // Track peak for trailing
+   if(profit > g_BasketPeakProfit) g_BasketPeakProfit = profit;
+
+   // --- Fixed take-profit (with dynamic reduction) -----------------
    if(profit >= tpMoney && tpMoney > 0.0)
      {
-      CloseAllEAPositions(StringFormat("Basket TP (%.2f >= %.2f)", profit, tpMoney));
+      CloseAllEAPositions(StringFormat("Basket TP (%.2f >= %.2f, tp%%=%.2f)",
+                                       profit, tpMoney, tpPct));
       return(true);
      }
+
+   // --- Basket trailing: once profit has exceeded activation,      |
+   //     close on give-back beyond the configured fraction.         |
+   if(InpUseBasketTrailing)
+     {
+      const double activateMoney = equity * (InpTrailActivatePercent / 100.0);
+      if(g_BasketPeakProfit >= activateMoney && activateMoney > 0.0)
+        {
+         const double giveBack = g_BasketPeakProfit * InpTrailGiveBackPercent;
+         const double trailFloor = g_BasketPeakProfit - giveBack;
+         if(profit <= trailFloor)
+           {
+            CloseAllEAPositions(StringFormat("Basket TRAIL: %.2f <= floor %.2f (peak %.2f)",
+                                             profit, trailFloor, g_BasketPeakProfit));
+            return(true);
+           }
+        }
+     }
+
+   // --- Kill-switch ------------------------------------------------
    if(profit <= -slMoney && slMoney > 0.0)
      {
       CloseAllEAPositions(StringFormat("KILL-SWITCH: %.2f <= -%.2f (%.2f%% equity)",
                                        profit, slMoney, g_BasketSLPercent));
+      // Enter recovery mode for the next few cycles
+      if(InpUseRecoveryMode)
+        {
+         g_RecoveryLeft = MathMax(1, InpRecoveryCycles);
+         VLog(StringFormat("Entering RECOVERY mode for %d cycle(s) at %.2f%% lot",
+                           g_RecoveryLeft, InpRecoveryLotFactor * 100.0));
+        }
       return(true);
      }
+
    if(IsFridayClosingTime())
      {
       CloseAllEAPositions("Friday weekend-close");
@@ -760,6 +957,11 @@ bool TryAddGridLevel(const int side)
    if(!CanAddGridLevel(side))  return(false);
    if(!SpreadOK(_Symbol))      return(false);
 
+   // NEW: block grid additions during adverse strong trends
+   if(ADXBlocksGridAdd(side))  return(false);
+   // NEW: block grid additions during ATR spikes
+   if(VolatilitySpikeBlocks()) return(false);
+
    const double atr = GetATR();
    if(atr <= 0.0) return(false);
 
@@ -769,7 +971,12 @@ bool TryAddGridLevel(const int side)
    double lastPrice = 0.0, lastLot = 0.0;
    datetime lastT   = 0;
    if(!GetLastSidePosition(side, lastPrice, lastLot, lastT))
-      return(OpenMarket(side == 0, NextGridLot(side)));
+     {
+      // No existing position on this side -> open the first one at market
+      const double firstLot = NextGridLot(side);
+      if(!TotalExposureOK(firstLot)) return(false);
+      return(OpenMarket(side == 0, firstLot));
+     }
 
    const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -777,7 +984,14 @@ bool TryAddGridLevel(const int side)
                            ? (ask <= lastPrice - step)
                            : (bid >= lastPrice + step);
    if(!shouldAdd) return(false);
-   return(OpenMarket(side == 0, NextGridLot(side)));
+
+   const double addLot = NextGridLot(side);
+   if(!TotalExposureOK(addLot))
+     {
+      VLog(StringFormat("Grid add blocked: total volume cap %.2f reached", InpMaxTotalLots));
+      return(false);
+     }
+   return(OpenMarket(side == 0, addLot));
   }
 
 //+------------------------------------------------------------------+
@@ -810,6 +1024,13 @@ bool TryOpenHedge(const int loserSide)
    if(hedgeLot > g_MaxLotCap) hedgeLot = g_MaxLotCap;
    hedgeLot = NormalizeLot(_Symbol, hedgeLot);
    if(hedgeLot <= 0.0) return(false);
+
+   // NEW: respect total-volume cap on the hedge too
+   if(!TotalExposureOK(hedgeLot))
+     {
+      VLog("Hedge blocked: total volume cap reached");
+      return(false);
+     }
 
    VLog(StringFormat("HEDGE: opening %s lot=%.2f (loser avg=%.5f, dist=%.5f)",
                      hedgeSide == 0 ? "BUY" : "SELL", hedgeLot, avg, triggerDist));
@@ -998,21 +1219,38 @@ void OnTick()
       if(!SpreadOK(_Symbol)) return;
 
       const int vote = EvaluateEntry();
+
+      // Helper lambda: opens only if total-exposure cap allows
+      double lotB = NextGridLot(0);
+      double lotS = NextGridLot(1);
+
+      bool opened = false;
       switch(vote)
         {
          case ENTRY_BUY:
-            if(CanOpenMorePositions()) OpenMarket(true,  NextGridLot(0));
+            if(CanOpenMorePositions() && TotalExposureOK(lotB))
+               opened = OpenMarket(true,  lotB);
             break;
          case ENTRY_SELL:
-            if(CanOpenMorePositions()) OpenMarket(false, NextGridLot(1));
+            if(CanOpenMorePositions() && TotalExposureOK(lotS))
+               opened = OpenMarket(false, lotS);
             break;
          case ENTRY_BOTH:
-            if(CanOpenMorePositions()) OpenMarket(true,  NextGridLot(0));
-            if(CanOpenMorePositions()) OpenMarket(false, NextGridLot(1));
+            if(CanOpenMorePositions() && TotalExposureOK(lotB))
+               opened = OpenMarket(true,  lotB) || opened;
+            if(CanOpenMorePositions() && TotalExposureOK(lotS))
+               opened = OpenMarket(false, lotS) || opened;
             break;
          case ENTRY_NONE:
          default:
             break;
+        }
+
+      // Consume one recovery cycle on the start of a fresh basket
+      if(opened && g_RecoveryLeft > 0)
+        {
+         g_RecoveryLeft--;
+         VLog(StringFormat("Recovery cycle consumed, %d remaining", g_RecoveryLeft));
         }
      }
   }
