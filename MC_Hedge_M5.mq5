@@ -1,6 +1,19 @@
 //+------------------------------------------------------------------+
-//|                                       MC_Hedge_M5_v2.03.mq5       |
+//|                                          MC_Hedge_M5.mq5 (v2.04)  |
 //|        Fibo zone entry (M5) + ATR-gated SINGLE-HEDGE Recovery     |
+//|                                                                   |
+//| v2.04 changes (vs v2.03):                                         |
+//|   P1-1 FIX: Strip L1 SL/TP BEFORE opening L2. If strip fails,     |
+//|         abort the hedge for this tick and retry next tick.        |
+//|         Closes the open/strip race on news spikes.                |
+//|   P1-2 FIX: Fresh-zone re-arm latch. After any L1 close, require  |
+//|         at least one M5 bar to CLOSE outside the Fibo zone band   |
+//|         before a new L1 can fire. Prevents serial-loss chop after |
+//|         basket SL / cooldown in range-bound markets.              |
+//|   P1-5 FIX: On failed single-TP close, return false (retry next   |
+//|         tick) instead of falling through to trailing-SL update.   |
+//|   P1-8 HINT: On init-fail (non-hedging account), print explicit   |
+//|         "Tester: Options -> Tester -> Account type = Hedge" hint. |
 //|                                                                   |
 //| v2.03 changes (vs v2.02):                                         |
 //|   1.  REMOVED: Asymmetric L2 exit (close L2 + L1->BE).            |
@@ -21,8 +34,7 @@
 //| Account: HEDGING ONLY                                             |
 //+------------------------------------------------------------------+
 #property copyright "MC / FETOUH"
-#property version   "2.03"
-#property strict
+#property version   "2.04"
 
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -137,6 +149,13 @@ string   g_cooldownGV     = "";   // GlobalVariable name (built in OnInit)
 double   g_singleTrailWatermark = 0.0;   // Peak favorable price (BUY: max bid; SELL: min ask)
 bool     g_singleTrailActive    = false;
 
+// [P1-2 FIX v2.04] Fresh-zone re-arm latch.
+// After any L1/basket close, a new L1 may NOT fire in the same Fibo zone
+// until at least one M5 bar closes OUTSIDE the upper/lower band.
+// This prevents serial losses in range-bound chop after basket SL + cooldown.
+bool     g_freshZoneRequired   = false;   // true = we must see one bar close outside the band
+string   g_freshZoneReason     = "";
+
 // Symbol cache
 int      g_stopsLevel    = 0;
 int      g_freezeLevel   = 0;
@@ -247,6 +266,56 @@ bool IsNewBar()
 {
    datetime curr = iTime(_Symbol, PERIOD_M5, 0);
    if(curr != g_lastBarTime) { g_lastBarTime = curr; return true; }
+   return false;
+}
+
+//==================================================================//
+// [P1-2 FIX v2.04] Fresh-zone re-arm latch                           //
+//==================================================================//
+// After any L1 close (single TP, basket TP/SL, emergency, daily,    //
+// weekend), we set g_freshZoneRequired = true. CheckFreshZoneReArm  //
+// clears it only once the most-recently closed M5 bar printed a     //
+// close OUTSIDE the current Fibo upper/lower band. This prevents    //
+// serial L1 re-entries in the same zone after a basket SL exit in a //
+// range-bound market.                                               //
+//                                                                   //
+// Call ArmFreshZoneLatch() from every close path; call              //
+// CheckFreshZoneReArm() from DetectFiboSignal() before firing.      //
+//==================================================================//
+void ArmFreshZoneLatch(string reason)
+{
+   if(g_freshZoneRequired) return;
+   g_freshZoneRequired = true;
+   g_freshZoneReason   = reason;
+   if(InpVerboseLogging)
+      PrintFormat("Fresh-zone latch ARMED (%s). Next L1 requires a bar close outside zone.", reason);
+}
+
+// Disarms latch if last closed M5 bar closed outside the band.
+// upperZone / lowerZone are the same bounds used by DetectFiboSignal.
+// Returns true if entries are allowed (latch disarmed or never armed).
+bool CheckFreshZoneReArm(double upperZone, double lowerZone)
+{
+   if(!g_freshZoneRequired) return true;
+
+   // Shift 1 = last fully closed M5 bar
+   double closedPx[];
+   if(CopyClose(_Symbol, PERIOD_M5, 1, 1, closedPx) < 1) return false;
+   double lastClose = closedPx[0];
+
+   // "Outside the band" means closed above upper zone OR below lower zone.
+   // (Zones are sell-above-upper, buy-below-lower, so a close between them
+   // is the no-signal corridor and does NOT disarm the latch.)
+   bool outside = (lastClose > upperZone) || (lastClose < lowerZone);
+   if(outside)
+   {
+      g_freshZoneRequired = false;
+      if(InpVerboseLogging)
+         PrintFormat("Fresh-zone latch DISARMED: bar close %.*f outside [%.*f, %.*f] (prev reason: %s).",
+                     g_digits, lastClose, g_digits, lowerZone, g_digits, upperZone, g_freshZoneReason);
+      g_freshZoneReason = "";
+      return true;
+   }
    return false;
 }
 
@@ -490,6 +559,7 @@ void CloseAllPositions(string reason)
       g_currentBasketLot         = 0.0;
       g_singleTrailActive        = false;
       g_singleTrailWatermark     = 0.0;
+      ArmFreshZoneLatch(reason);   // P1-2: require fresh-zone re-arm after any bulk close
    }
 }
 
@@ -529,9 +599,14 @@ bool CheckSingleTradeExits()
          g_currentBasketLot     = 0.0;
          g_singleTrailActive    = false;
          g_singleTrailWatermark = 0.0;
+         ArmFreshZoneLatch("single TP");   // P1-2: require fresh-zone re-arm
          return true;
       }
+      // [P1-5 FIX v2.04] Close failed — do NOT fall through to trailing update.
+      // Retry the close on the next tick; trailing would issue a useless
+      // PositionModify on a position about to close.
       LogTradeError("Single TP close");
+      return false;
    }
 
    // High-watermark trailing
@@ -639,9 +714,14 @@ bool CheckBasketExits()
 
 //==================================================================//
 // Strip per-position SL/TP from L1 when basket activates             //
+// [P1-1 FIX v2.04] Returns true only if ALL positions stripped ok.   //
+// Caller (hedge recovery) uses the bool to abort the L2 open if the  //
+// strip failed, so we never end up with a naked L2 + still-protected //
+// L1 that could close itself mid-basket on a gap.                    //
 //==================================================================//
-void StripL1ProtectionForBasket()
+bool StripL1ProtectionForBasket()
 {
+   bool allOk = true;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(!m_position.SelectByIndex(i)) continue;
@@ -651,12 +731,19 @@ void StripL1ProtectionForBasket()
       double tp = m_position.TakeProfit();
       if(sl == 0.0 && tp == 0.0) continue;
       if(!trade.PositionModify(m_position.Ticket(), 0.0, 0.0))
+      {
          LogTradeError(StringFormat("Strip L1 SL/TP #%I64u", m_position.Ticket()));
+         allOk = false;
+      }
       else if(InpVerboseLogging)
          PrintFormat("L1 SL/TP stripped (basket mode): #%I64u", m_position.Ticket());
    }
-   g_singleTrailActive    = false;
-   g_singleTrailWatermark = 0.0;
+   if(allOk)
+   {
+      g_singleTrailActive    = false;
+      g_singleTrailWatermark = 0.0;
+   }
+   return allOk;
 }
 
 //==================================================================//
@@ -772,6 +859,17 @@ int DetectFiboSignal()
    if(!ADX_Strong())
    {
       if(InpVerboseLogging) PrintFormat("Fibo signal blocked by ADX < %d", InpADX_Min);
+      return 0;
+   }
+
+   // [P1-2 FIX v2.04] Fresh-zone re-arm gate: after a prior close, require a
+   // bar to close outside the band before accepting a new L1. Blocks serial
+   // re-entries in the same zone after basket SL + cooldown.
+   if(!CheckFreshZoneReArm(upperZone, lowerZone))
+   {
+      if(InpVerboseLogging)
+         PrintFormat("Fibo signal blocked: fresh-zone latch armed (reason: %s).",
+                     g_freshZoneReason);
       return 0;
    }
 
@@ -891,6 +989,20 @@ void ManageHedgeRecovery()
    double lotNorm = CalculateLayerLot(newLayerIdx, lastLot);
    string cmt;
 
+   // [P1-1 FIX v2.04] Strip L1's per-leg SL/TP BEFORE opening L2. If the strip
+   // fails, abort this tick's hedge so we never end up with a naked L2 + still-
+   // protected L1 (the trailing SL could fire mid-basket on a gap and leave us
+   // with a single L2 sized as if L1 were still open). Retry on the next tick.
+   if(total == 1)
+   {
+      if(!StripL1ProtectionForBasket())
+      {
+         if(InpVerboseLogging)
+            Print("Hedge: L1 strip failed, aborting L2 open for this tick. Will retry.");
+         return;
+      }
+   }
+
    if(newLayerDir == POSITION_TYPE_BUY)
    {
       cmt = StringFormat("%s BUY L%d (Hedge)", InpOrderComment, newLayerIdx);
@@ -901,7 +1013,6 @@ void ManageHedgeRecovery()
          if(InpVerboseLogging)
             PrintFormat("Hedge BUY L%d @ %.*f | lot=%.2f | step=%.*f (ATR×%.2f)",
                         newLayerIdx, g_digits, ask, lotNorm, g_digits, stepPrice, InpHedgeATRMult);
-         if(total == 1) StripL1ProtectionForBasket();
       }
    }
    else
@@ -914,7 +1025,6 @@ void ManageHedgeRecovery()
          if(InpVerboseLogging)
             PrintFormat("Hedge SELL L%d @ %.*f | lot=%.2f | step=%.*f (ATR×%.2f)",
                         newLayerIdx, g_digits, bid, lotNorm, g_digits, stepPrice, InpHedgeATRMult);
-         if(total == 1) StripL1ProtectionForBasket();
       }
    }
 }
@@ -1073,7 +1183,7 @@ void CreateDashboard()
    int totalHeight = 14 * DASH_LINE_HEIGHT + DASH_PADDING * 2 + 40;
    CreateRectLabel(DASH_PREFIX + "BG_MAIN",   0, 0, DASH_WIDTH, totalHeight, COLOR_BG_MAIN);
    CreateRectLabel(DASH_PREFIX + "BG_HEADER", 0, 0, DASH_WIDTH, 32, COLOR_BG_HEADER);
-   CreateLabel(DASH_PREFIX + "TITLE", DASH_PADDING, 8, "MC HEDGE M5 v2.03", COLOR_TEXT_MAIN, 11, "Consolas Bold");
+   CreateLabel(DASH_PREFIX + "TITLE", DASH_PADDING, 8, "MC HEDGE M5 v2.04", COLOR_TEXT_MAIN, 11, "Consolas Bold");
    CreateLabel(DASH_PREFIX + "STATUS_DOT", DASH_WIDTH - 70, 8, "* LIVE", COLOR_ACTIVE, 10, "Consolas Bold");
 
    int y = 40;
@@ -1218,7 +1328,11 @@ int OnInit()
    ENUM_ACCOUNT_MARGIN_MODE mm = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
    if(mm != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
    {
-      Alert("MC_Hedge_M5 v2.03: Hedging account REQUIRED. Init failed.");
+      // [P1-8 FIX v2.04] Explicit tester hint — this is the #1 first-run footgun.
+      Print("MC_Hedge_M5 v2.04: Hedging account REQUIRED. Init failed.");
+      Print("  If in Strategy Tester: Options -> Tester -> set 'Account type' to 'Hedge' and re-run.");
+      Print("  If on live/demo: contact broker; this EA cannot run on a Netting account.");
+      Alert("MC_Hedge_M5 v2.04: Hedging account REQUIRED. See Experts tab for how to enable.");
       return INIT_FAILED;
    }
 
@@ -1251,11 +1365,13 @@ int OnInit()
    g_singleTrailActive    = false;
    g_singleTrailWatermark = 0.0;
    g_currentBasketLot     = 0.0;
+   g_freshZoneRequired    = false;   // P1-2: start disarmed on fresh attach
+   g_freshZoneReason      = "";
 
    if(InpShowDashboard) CreateDashboard();
    EventSetTimer(5);   // 5s timer for dashboard refresh only
 
-   PrintFormat("MC_Hedge_M5 v2.03: ONLINE | Symbol=%s | StopsLevel=%d | Digits=%d | Magic=%I64u",
+   PrintFormat("MC_Hedge_M5 v2.04: ONLINE | Symbol=%s | StopsLevel=%d | Digits=%d | Magic=%I64u",
                _Symbol, g_stopsLevel, g_digits, InpMagicNumber);
    PrintFormat("Volume: Min=%.2f Max=%.2f Step=%.2f", g_volMin, g_volMax, g_volStep);
    PrintFormat("Single L1: TP=$%.2f Trail=%s (start=%d, dist=%d, step=%d) high-watermark anchored",
@@ -1285,7 +1401,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    DeleteDashboard();
    ReleaseIndicatorHandles();
-   PrintFormat("MC_Hedge_M5 v2.03: Shutting down. Reason code=%d", reason);
+   PrintFormat("MC_Hedge_M5 v2.04: Shutting down. Reason code=%d", reason);
 }
 
 void OnTimer()
